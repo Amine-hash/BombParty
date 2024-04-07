@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "serveur.h": "c",
+        "common.h": "c",
+        "shm.h": "c",
+        "signal.h": "c"
+    }
+}

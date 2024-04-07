@@ -2,7 +2,7 @@
 #define GAME_STRUCTURES_H
 
 #define MAX_LETTERS 10
-#define MAX_PLAYERS 10
+#define MAX_PLAYERS 100
 #define MAX_NAME_LENGTH 20
 
 typedef struct {
