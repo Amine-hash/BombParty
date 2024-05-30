@@ -6,8 +6,10 @@ pid_t client_pids[MAX_PLAYERS];
 int num_clients = 0;
 int num_parties = 0;
 char *shm_ptr;
+char lettres_a_jouer;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t notify_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 
 void create_named_pipe(const char *tube_name) {
     if (access(tube_name, F_OK) == 0) {
@@ -15,7 +17,7 @@ void create_named_pipe(const char *tube_name) {
     }
     CHECK(mkfifo(tube_name, 0666), -1, "Erreur lors de la création du tube nommé");
 }
-//coucou
+
 void send_confirmation(const char *tube_name, const char *message) {
     int confirm_tube = open(tube_name, O_WRONLY);
     CHECK(confirm_tube, -1, "Erreur lors de l'ouverture du tube nommé pour confirmation");
@@ -74,7 +76,7 @@ void notify_players(Partie *partie, const char *pseudo) {
     pthread_mutex_unlock(&notify_mutex);
 }
 
-//coucou
+
 void handle_join_game(char *buffer, const char *tube_name, pid_t pid) {
     int partie_id;
     char pseudo[MAX_NAME_LENGTH];
@@ -154,7 +156,7 @@ void *game_thread(void *arg) {
     // Gérer la logique du jeu ici...
     // envoyer un signal SIGUSR1 à chaque joueur pour commencer le jeu
     for (int i = 0; i < partie->nombre_joueur_courant; i++) {
-        printf("Envoi d'un signal SIGUSR1 au joueur %d.\n", partie->joueurs[i].id);
+        printf("Envoi d'un signal la partie va commencer au joueur %d.\n", partie->joueurs[i].id);
         kill(partie->joueurs[i].id, SIGUSR1);
     }
     printf("La partie a démarré.\n");
@@ -164,13 +166,38 @@ void *game_thread(void *arg) {
         fflush(stdout);
         sleep(1);
     }
-    while(1){
-        // attendre un nouveau joueur
+    while(1){   
+        // Écrire le message pour le joueur dans le tube
+    HashTable* groupes_lettres_utilisés = createTable();
+    generer_groupe_lettres_array(lettres_a_jouer, dictionnaire_array, taille_dictionnaire_array,groupes_lettres_utilisés);
+    insert(groupes_lettres_utilisés,lettres_a_jouer,1);
+    for (int i = 0; i < partie->nombre_joueur_courant; i++) {
+        int tube_joueur= open(partie->joueurs[i].tube_name, O_WRONLY);
+        write(tube_joueur,lettres_a_jouer, strlen(lettres_a_jouer) + 1);
+        printf(lettres_a_jouer);
+        close(tube_joueur);
     }
-
+    for(int i = 0; i < partie->nombre_joueur_courant; i++){
+        printf("Envoi d'un signal c'est à toi de jouer au joueur %d.\n", partie->joueurs[i].id);
+        kill(partie->joueurs[i].id, SIGUSR2);
+        char mot_joué;
+        int tube_reponse;
+        do{
+            int tube_mot_joué= open(partie->joueurs[i].tube_name, O_RDONLY);
+            read(tube_mot_joué, mot_joué, sizeof(mot_joué));
+            close(tube_mot_joué);
+            tube_reponse= open(partie->joueurs[i].tube_name, O_WRONLY);
+            write(tube_reponse, "Réponse incorrect, essai encore", strlen(lettres_a_jouer) + 1);
+        }while (!(mot_existe(mot_joué, dictionnaire))|| strstr(mot_joué, lettres_a_jouer) == NULL);
+        write(tube_reponse, "Correct", strlen(lettres_a_jouer) + 1);
+        close(tube_reponse);
+    }
     pthread_exit(NULL);
 }
-void signal_handler(int sig, siginfo_t *info, void *context) {
+}
+
+
+void signal_handler(int sig, siginfo_t *info, void *context){
     if (sig == SIGUSR1) {
         pid_t pid = info->si_pid;
 
@@ -198,6 +225,7 @@ void signal_handler(int sig, siginfo_t *info, void *context) {
 }
 
 int main() {
+
     srand(time(NULL));
     printf("Serveur lancé\n");
     dictionnaire = createTable();

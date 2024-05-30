@@ -2,6 +2,7 @@
 int tube_fd;
 char tube_name[MAX_TUBE_NAME_LENGTH];
 int FLAG_DEMARRAGE_PARTIE = 0;
+
 void create_game(int msgid, pid_t pid) {
     char use_defaults;
     Message message;
