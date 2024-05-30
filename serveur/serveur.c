@@ -15,7 +15,7 @@ void create_named_pipe(const char *tube_name) {
     }
     CHECK(mkfifo(tube_name, 0666), -1, "Erreur lors de la création du tube nommé");
 }
-
+//coucou
 void send_confirmation(const char *tube_name, const char *message) {
     int confirm_tube = open(tube_name, O_WRONLY);
     CHECK(confirm_tube, -1, "Erreur lors de l'ouverture du tube nommé pour confirmation");
@@ -71,10 +71,10 @@ void notify_players(Partie *partie, const char *pseudo) {
             printf("Erreur lors de l'ouverture du tube nommé pour notification de joueur (%s).\n", partie->joueurs[j].tube_name);
         }
     }
-    pthread_mutex_unlock(&notify_mutex);nice
+    pthread_mutex_unlock(&notify_mutex);
 }
 
-
+//coucou
 void handle_join_game(char *buffer, const char *tube_name, pid_t pid) {
     int partie_id;
     char pseudo[MAX_NAME_LENGTH];
