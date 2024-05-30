@@ -3,6 +3,8 @@
         "serveur.h": "c",
         "common.h": "c",
         "shm.h": "c",
-        "signal.h": "c"
+        "signal.h": "c",
+        "type_traits": "c",
+        "game_structures.h": "c"
     }
 }

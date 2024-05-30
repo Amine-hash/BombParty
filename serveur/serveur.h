@@ -2,33 +2,25 @@
 #define SERVER_H
 
 #include "../common/common.h"
+#define FILENAME "../dictionnaire/Français_v2.txt"
+
+HashTable* dictionnaire;
+HashTable* groupes_lettres;
+char* dictionnaire_array[TABLE_SIZE];
+int taille_dictionnaire_array;
+int taille_dictionnaire;
+Partie parties[MAX_PARTIES];
+int nombre_parties = 0;
 
 
-// Fonction pour créer une nouvelle partie
-int createGame(int gameId, int maxPlayers, int difficulty, ...);
+void create_named_pipe(const char *tube_name);
+void send_confirmation(const char *tube_name, const char *message);
+void handle_new_game(char *buffer, const char *tube_name);
+void handle_join_game(char *buffer, const char *tube_name, pid_t pid);
+void notify_players(Partie *partie, const char *pseudo);
+void *client_thread(void *arg);
+void signal_handler(int sig, siginfo_t *info, void *context) ;
 
-// Fonction pour démarrer une partie
-void startGame(int gameId);
-
-// Fonction pour terminer une partie
-void endGame(int gameId);
-
-// Fonction pour distribuer les lettres aux joueurs
-void distributeLetters(int gameId);
-
-// Fonction pour passer la bombe au joueur suivant
-void passBomb(int gameId, int currentPlayerId);
-
-// Fonction pour initialiser les vies des joueurs
-void initializeLives(int gameId, int playerIds[], int numPlayers);
-
-// Fonction pour mettre à jour le nombre de vies restantes d'un joueur
-void updateRemainingLives(int gameId, int playerId, int remainingLives);
-
-// Fonction pour détecter la perte de vie d'un joueur
-void detectLifeLoss(int gameId, int playerId);
-
-// Fonction pour vérifier si un joueur est le dernier avec des vies
-void endGameIfLastPlayer(int gameId);
+void *game_thread(void *arg);
 
 #endif /* SERVER_H */

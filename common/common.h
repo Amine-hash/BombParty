@@ -13,8 +13,13 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <semaphore.h>
+#include <pthread.h>
+#include <sys/msg.h>
 // Incluez ici tous les fichiers d'en-tête nécessaires
 #include "game_structures.h"
 #include "constants.h"
+#include "gestion_dictionnaire.h"
+
+#define CHECK(expr, err_val, msg) if ((expr) == (err_val)) { perror(msg); exit(EXIT_FAILURE); }
 
 #endif /* COMMON_H */
