@@ -144,7 +144,6 @@ void *client_game_handler(void *arg) {
         fflush(stdout);
         sleep(1);
     }
-    exit(EXIT_SUCCESS);
     char * groupe_lettres_client = malloc(10 * sizeof(char));
     read(tube_fd, groupe_lettres_client, 10);
     printf("Groupe de lettres : %s\n", groupe_lettres_client);
