@@ -146,7 +146,7 @@ void *client_thread(void *arg) {
                 handle_join_game(buffer, tube_name, pid);
             }
         }
-        git config pull.rebase true est ce que les modificationsclose(tube);
+        close(tube);
     }
     return NULL;
 }
