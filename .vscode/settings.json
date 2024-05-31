@@ -5,6 +5,8 @@
         "shm.h": "c",
         "signal.h": "c",
         "type_traits": "c",
-        "game_structures.h": "c"
+        "game_structures.h": "c",
+        "unistd.h": "c",
+        "client.h": "c"
     }
 }

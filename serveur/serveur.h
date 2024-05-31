@@ -15,7 +15,7 @@ int nombre_parties = 0;
 
 void create_named_pipe(const char *tube_name);
 void send_confirmation(const char *tube_name, const char *message);
-void handle_new_game(char *buffer, const char *tube_name);
+void handle_new_game(char *buffer);
 void handle_join_game(char *buffer, const char *tube_name, pid_t pid);
 void notify_players(Partie *partie, const char *pseudo);
 void *client_thread(void *arg);

@@ -114,35 +114,63 @@ void join_game() {
 void *client_game_handler(void *arg) {
     Partie *partie = (Partie *)arg;
     printf("Partie en attente de nouveaux joueurs.\n");
-
+    ssize_t bytes_read;
     char buffer[256];
-    int tube_fd = open(tube_name, O_RDONLY);
-    while (FLAG_DEMARRAGE_PARTIE == 0) {
-        if (tube_fd == -1) {
-            perror("Erreur lors de l'ouverture du tube nommé");
-            continue;
-        }
+    
+    // Ouverture du tube nommé en mode non-bloquant
+    int tube_fd = open(tube_name, O_RDONLY | O_NONBLOCK);
+    if (tube_fd == -1) {
+        perror("Erreur lors de l'ouverture du tube nommé");
+        pthread_exit(NULL);
+    }
 
-        ssize_t bytes_read = read(tube_fd, buffer, sizeof(buffer));
+    while (FLAG_DEMARRAGE_PARTIE == 0) {
+        bytes_read = read(tube_fd, buffer, sizeof(buffer) - 1);  // -1 pour laisser de l'espace pour le null terminator
         if (bytes_read > 0) {
-            buffer[bytes_read] = '\0'; // Null-terminate the buffer
+            buffer[bytes_read] = '\0';
             if (strncmp(buffer, "PlayerJoin", 10) == 0) {
                 printf("Le joueur %s a rejoint la partie.\n", buffer + 11);
             }
-        } else if (bytes_read == 0) {
-            // Si la lecture retourne 0, cela signifie que l'extrémité d'écriture a été fermée
-            printf("Le serveur a fermé le tube nommé.\n");
-            continue;
-        } else {
-            if (bytes_read == -1) {
-                perror("Erreur lors de la lecture du tube nommé");
-            }
-            break;
+        } else if (bytes_read == -1 && errno != EAGAIN) {
+            perror("Erreur lors de la lecture dans le tube nommé");
+            close(tube_fd);
+            pthread_exit(NULL);
         }
-        memset(buffer, 0, sizeof(buffer));
-        printf("Attente de nouveaux joueurs...\n");
     }
+
     close(tube_fd);
+    for (int i = 10; i >= 0; i--) {
+        printf("%d.....", i);
+        fflush(stdout);
+        sleep(1);
+    }
+    exit(EXIT_SUCCESS);
+    char * groupe_lettres_client = malloc(10 * sizeof(char));
+    read(tube_fd, groupe_lettres_client, 10);
+    printf("Groupe de lettres : %s\n", groupe_lettres_client);
+
+    close(tube_fd);
+    while(1){
+        pause(); // Attendre le signal SIGUSR2 pour que le joueur puisse commencer à jouer
+        char reponse[256];
+        do {
+        char buffer2[256];
+        printf("Entrez un mot: ");
+        scanf("%s", buffer2);
+        int tube_mot_joué = open(tube_name, O_WRONLY);
+        CHECK(tube_mot_joué, -1, "Erreur lors de l'ouverture du tube nommé pour le mot joué");
+        write(tube_mot_joué, buffer2, strlen(buffer2) + 1);
+        close(tube_mot_joué);
+        int tube_reponse = open(tube_name, O_RDONLY);
+        CHECK(tube_reponse, -1, "Erreur lors de l'ouverture du tube nommé pour la réponse");
+        read(tube_reponse, reponse, sizeof(reponse));
+        if(strncmp(reponse, "Correct", 7) == 0){
+            printf("Mot correct\n");
+        }else{
+            printf("Mot incorrect\n");
+        }
+        } while(strncmp(reponse, "Correct", 7) != 0);
+    }
     return NULL;
 }
 
@@ -151,7 +179,13 @@ void *client_game_handler(void *arg) {
 void signal_handler(int signum) {
     if (signum == SIGUSR1) {
         printf("Signal SIGUSR1 reçu.\n");
+        printf("La partie va commencer.\n");
         FLAG_DEMARRAGE_PARTIE = 1;
+    }
+    if (signum == SIGUSR2) {
+        printf("Signal SIGUSR2 reçu.\n");
+        printf("C'est à votre tour de jouer.\n");
+        exit(EXIT_SUCCESS);
     }
 }
 int main() {
@@ -162,6 +196,7 @@ int main() {
     action.sa_handler = signal_handler;
     sigemptyset(&action.sa_mask);
     CHECK(sigaction(SIGUSR1, &action, NULL), -1, "Erreur lors de l'installation du gestionnaire de signal de SIGUSR1");
+    CHECK(sigaction(SIGUSR2, &action, NULL), -1, "Erreur lors de l'installation du gestionnaire de signal de SIGUSR2");
     // Ouverture du sémaphore partagé
     semaphore = sem_open(SEMAPHORE_NAME, O_RDWR); // si le sémaphore n'existe pas, il est créé avec une valeur initiale de 0 
     CHECK(semaphore, SEM_FAILED, "Erreur lors de l'ouverture du sémaphore");
