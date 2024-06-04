@@ -1,7 +1,9 @@
 #include "client.h"
+
 int tube_fd;
 char tube_name[MAX_TUBE_NAME_LENGTH];
-int FLAG_DEMARRAGE_PARTIE = 0;
+volatile sig_atomic_t FLAG_DEMARRAGE_PARTIE = 0;
+volatile sig_atomic_t FLAG_TOUR_JOUEUR = 0;
 
 void create_game(int msgid, pid_t pid) {
     char use_defaults;
@@ -21,7 +23,7 @@ void create_game(int msgid, pid_t pid) {
 
     if (use_defaults == 'y') {
         message.partie.nombre_vies = DEFAULT_VIES;
-        message.partie.nombre_joueur_max = DEFAULT_JOUEURS;
+        message.partie.nombre_joueur_max = 2;
     } else {
         printf("Entrez le nombre de vies : ");
         scanf("%d", &message.partie.nombre_vies);
@@ -37,10 +39,13 @@ void create_game(int msgid, pid_t pid) {
         exit(EXIT_FAILURE);
     }
     *partie = message.partie;
+
     char message_serv[50];
-    snprintf(message_serv, sizeof(message), "NewGame|%d", msgid);
-    CHECK(write(tube_fd, message_serv, sizeof(message_serv)), -1, "Erreur lors de l'envoi du message au serveur");   
-    close(tube_fd);
+    snprintf(message_serv, sizeof(message_serv), "NewGame|%d", msgid);
+    CHECK(write_to_pipe(tube_fd, message_serv, sizeof(message_serv)), -1, "Erreur lors de l'envoi du message au serveur");
+
+    close_pipe(tube_fd);
+
     pthread_t game_thread;
     pthread_create(&game_thread, NULL, client_game_handler, partie);
     pthread_join(game_thread, NULL);
@@ -65,6 +70,7 @@ void join_game() {
         shmdt(shm_ptr);
         return;
     }
+
     int num_parties_disponibles = 0;
     printf("Parties disponibles:\n");
     for (int i = 0; i < *num_parties; i++) {
@@ -73,35 +79,40 @@ void join_game() {
             num_parties_disponibles++;
         }
     }
+
     if (num_parties_disponibles == 0) {
         printf("Aucune partie disponible.\n");
         shmdt(shm_ptr);
         return;
     }
+
     int partie_id;
     char pseudo[MAX_NAME_LENGTH];
     printf("Entrez l'ID de la partie à rejoindre: ");
     scanf("%d", &partie_id);
     printf("Entrez votre pseudo: ");
     scanf("%s", pseudo);
+
     // Envoyer une demande de rejoindre une partie au serveur
     char message[256];
     snprintf(message, sizeof(message), "JoinGame|%d|%s", partie_id, pseudo);
-    write(tube_fd, message, strlen(message) + 1);
-    close(tube_fd);
+    write_to_pipe(tube_fd, message, strlen(message) + 1);
+    close_pipe(tube_fd);
+
     sem_post(semaphore);
     shmdt(shm_ptr);
+
     // Attendre une confirmation ou une erreur du serveur
-    int confirm_tube = open(tube_name, O_RDONLY);
+    int confirm_tube = open_named_pipe(tube_name, O_RDONLY);
     CHECK(confirm_tube, -1, "Erreur lors de l'ouverture du tube nommé pour confirmation");
+
     char confirm_buffer[256];
-    ssize_t bytes_read = read(confirm_tube, confirm_buffer, sizeof(confirm_buffer));
+    ssize_t bytes_read = read_from_pipe(confirm_tube, confirm_buffer, sizeof(confirm_buffer));
     if (bytes_read > 0) {
-         close(confirm_tube);
+        close_pipe(confirm_tube);
         if (strncmp(confirm_buffer, "JoinConfirm", 11) == 0) {
             printf("Rejoint la partie avec succès.\n");
             Partie *partie_rejointe = recuperer_infos_partie(partie_id);
-            // Here you might want to get the updated details about the joined party
             pthread_t game_thread;
             pthread_create(&game_thread, NULL, client_game_handler, partie_rejointe);
             pthread_join(game_thread, NULL);
@@ -111,21 +122,29 @@ void join_game() {
     }
     exit(EXIT_SUCCESS);
 }
+
 void *client_game_handler(void *arg) {
     Partie *partie = (Partie *)arg;
+    // créer un nom de semaphore unique à la partie à l'aide du pid du premier joueur
+    char semaphore_name[50];
+    char semaphore_name2[50];
+    char semaphore_name3[50];
+    snprintf(semaphore_name, sizeof(semaphore_name), "%s_%d", SEMAPHORE_NAME, partie->joueurs[0].id);
+    snprintf(semaphore_name2, sizeof(semaphore_name2), "%s_%d_mot", SEMAPHORE_NAME, partie->joueurs[0].id);
+    snprintf(semaphore_name3, sizeof(semaphore_name3), "%s_%d_reponse", SEMAPHORE_NAME, partie->joueurs[0].id);
     printf("Partie en attente de nouveaux joueurs.\n");
     ssize_t bytes_read;
     char buffer[256];
-    
+
     // Ouverture du tube nommé en mode non-bloquant
-    int tube_fd = open(tube_name, O_RDONLY | O_NONBLOCK);
+    int tube_fd = open_named_pipe(tube_name, O_RDONLY | O_NONBLOCK);
     if (tube_fd == -1) {
         perror("Erreur lors de l'ouverture du tube nommé");
         pthread_exit(NULL);
     }
 
     while (FLAG_DEMARRAGE_PARTIE == 0) {
-        bytes_read = read(tube_fd, buffer, sizeof(buffer) - 1);  // -1 pour laisser de l'espace pour le null terminator
+        bytes_read = read_from_pipe(tube_fd, buffer, sizeof(buffer) - 1);  // -1 pour laisser de l'espace pour le null terminator
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0';
             if (strncmp(buffer, "PlayerJoin", 10) == 0) {
@@ -133,127 +152,169 @@ void *client_game_handler(void *arg) {
             }
         } else if (bytes_read == -1 && errno != EAGAIN) {
             perror("Erreur lors de la lecture dans le tube nommé");
-            close(tube_fd);
+            close_pipe(tube_fd);
             pthread_exit(NULL);
         }
     }
+    close_pipe(tube_fd);
+    sem_t *semaphore_partie = sem_open(semaphore_name, O_CREAT, 0666, 0);
+    if(semaphore_partie == SEM_FAILED){
+        perror("Erreur lors de la création du sémaphore");
+        pthread_exit(NULL);
+    }
+    sem_t *semaphore_mot = sem_open(semaphore_name2, O_CREAT, 0666, 0);
+    if (semaphore_partie == SEM_FAILED) {
+        perror("Erreur lors de la création du sémaphore");
+        pthread_exit(NULL);
+    }
+    sem_t *semaphore_reponse = sem_open(semaphore_name3, O_CREAT, 0666, 0);
+    if (semaphore_partie == SEM_FAILED) {
+        perror("Erreur lors de la création du sémaphore");
+        pthread_exit(NULL);
+    }    
 
-    close(tube_fd);
-    for (int i = 10; i >= 0; i--) {
+    for (int i = 3; i >= 0; i--) {
         printf("%d.....", i);
         fflush(stdout);
         sleep(1);
     }
-    char * groupe_lettres_client = malloc(10 * sizeof(char));
-    read(tube_fd, groupe_lettres_client, 10);
-    printf("Groupe de lettres : %s\n", groupe_lettres_client);
-
-    close(tube_fd);
-    while(1){
-        pause(); // Attendre le signal SIGUSR2 pour que le joueur puisse commencer à jouer
-        char reponse[256];
-        do {
-        char buffer2[256];
-        printf("Entrez un mot: ");
-        scanf("%s", buffer2);
-        int tube_mot_joué = open(tube_name, O_WRONLY);
-        CHECK(tube_mot_joué, -1, "Erreur lors de l'ouverture du tube nommé pour le mot joué");
-        write(tube_mot_joué, buffer2, strlen(buffer2) + 1);
-        close(tube_mot_joué);
-        int tube_reponse = open(tube_name, O_RDONLY);
-        CHECK(tube_reponse, -1, "Erreur lors de l'ouverture du tube nommé pour la réponse");
-        read(tube_reponse, reponse, sizeof(reponse));
-        if(strncmp(reponse, "Correct", 7) == 0){
-            printf("Mot correct\n");
-        }else{
-            printf("Mot incorrect\n");
+    printf("\n");
+    while (1) {
+        tube_fd = open_named_pipe(tube_name, O_RDWR);
+        if (tube_fd == -1) {
+            perror("Erreur lors de l'ouverture du tube nommé pour le groupe de lettres");
+            sem_close(semaphore_partie);
+            pthread_exit(NULL);
         }
-        } while(strncmp(reponse, "Correct", 7) != 0);
+
+        char groupe_lettres_client[10];
+        while ((bytes_read = read_from_pipe(tube_fd, groupe_lettres_client, sizeof(groupe_lettres_client) - 1)) <= 0);
+        sem_post(semaphore_partie); // Signal after reading
+        groupe_lettres_client[bytes_read] = '\0'; // Null-terminate the buffer
+        printf("Groupe de lettres : %s\n", groupe_lettres_client);
+        usleep(100000);
+        if(FLAG_TOUR_JOUEUR == 0){
+            close_pipe(tube_fd);
+            continue;
+        }
+        char reponse[256];
+         do {
+            char buffer2[256];
+            printf("Entrez un mot: ");
+            scanf("%255s", buffer2); // Limiter la lecture à 255 caractères
+            write_to_pipe(tube_fd, buffer2, strlen(buffer2) + 1);
+            sem_post(semaphore_partie); // Signal after writing
+            while ((bytes_read = read_from_pipe(tube_fd, reponse, sizeof(reponse) - 1)) <= 0);
+            printf("Reponse recue\n");
+            if (bytes_read > 0) {
+                reponse[bytes_read] = '\0'; // Null-terminate the buffer
+                if (strncmp(reponse, "Correct", 7) == 0) {
+                    printf("Mot correct\n");
+                } else {
+                    printf("Mot incorrect\n");
+                }
+            } else {
+                perror("Erreur lors de la lecture de la réponse");
+            }
+        } while (strncmp(reponse, "Correct", 7) != 0);
+        sem_post(semaphore_mot); // Signal after reading
+        FLAG_TOUR_JOUEUR = 0;
     }
+    close_pipe(tube_fd);
+    sem_close(semaphore_partie);
     return NULL;
 }
 
-
-
 void signal_handler(int signum) {
     if (signum == SIGUSR1) {
-        printf("Signal SIGUSR1 reçu.\n");
         printf("La partie va commencer.\n");
         FLAG_DEMARRAGE_PARTIE = 1;
     }
     if (signum == SIGUSR2) {
-        printf("Signal SIGUSR2 reçu.\n");
         printf("C'est à votre tour de jouer.\n");
-        exit(EXIT_SUCCESS);
+        FLAG_TOUR_JOUEUR = 1;
     }
 }
+
 int main() {
     sem_t *semaphore;
-        
+
     // Installation du gestionnaire de signal
     struct sigaction action;
     action.sa_handler = signal_handler;
     sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
     CHECK(sigaction(SIGUSR1, &action, NULL), -1, "Erreur lors de l'installation du gestionnaire de signal de SIGUSR1");
     CHECK(sigaction(SIGUSR2, &action, NULL), -1, "Erreur lors de l'installation du gestionnaire de signal de SIGUSR2");
+
     // Ouverture du sémaphore partagé
-    semaphore = sem_open(SEMAPHORE_NAME, O_RDWR); // si le sémaphore n'existe pas, il est créé avec une valeur initiale de 0 
+    semaphore = sem_open(SEMAPHORE_NAME, O_RDWR); // si le sémaphore n'existe pas, il est créé avec une valeur initiale de 0
     CHECK(semaphore, SEM_FAILED, "Erreur lors de l'ouverture du sémaphore");
-        // Récupération de l'identifiant de la mémoire partagée
+
+    // Récupération de l'identifiant de la mémoire partagée
     int shmid = shmget(SHARED_MEMORY_KEY, SHARED_MEMORY_SIZE, 0666);
     CHECK(shmid, -1, "Erreur lors de la récupération de la mémoire partagée");
     printf("shmid = %d\n", shmid);
+
     // Attachement de la mémoire partagée
     char *shm_ptr = shmat(shmid, NULL, 0);
-    CHECK(shm_ptr, (char *) -1, "Erreur lors de l'attachement de la mémoire partagée");
+    CHECK(shm_ptr, (char *)-1, "Erreur lors de l'attachement de la mémoire partagée");
 
     // Récupération du PID du serveur depuis la mémoire partagée
     pid_t server_pid;
     memcpy(&server_pid, shm_ptr, sizeof(pid_t));
     printf("PID du serveur : %d\n", server_pid);
+
     int msgid = msgget(IPC_PRIVATE, 0666 | IPC_CREAT);
     CHECK(msgid, -1, "Erreur lors de la création de la BAL");
+
     // Envoi d'un signal au serveur pour indiquer la connexion
-    server_pid = (pid_t) server_pid;
     CHECK(kill(server_pid, SIGUSR1), -1, "Erreur lors de l'envoi du signal au serveur");
+
     // Attente de la libération du sémaphore par le serveur
     CHECK(sem_wait(semaphore), -1, "Erreur lors de l'attente de la libération du sémaphore");
-    sprintf(tube_name,"%s%d", PIPE_PATH, getpid());
+
+    snprintf(tube_name, sizeof(tube_name), "%s%d", PIPE_PATH, getpid());
 
     // Lecture du nom du tube nommé
     printf("Nom du tube nommé associé au client : %s\n", tube_name);
-    
+
     int choice;
-    do{
-    printf("1. Create a new game\n");
-    printf("2. Join an existing game\n");
-    printf("3. Exit\n");
-    printf("Enter your choice: ");
-    scanf("%d", &choice);
-    printf("tube_name = %s\n", tube_name);
-    tube_fd = open(tube_name, O_WRONLY);
-    CHECK(tube_fd, -1, "Erreur lors de l'ouverture du tube nommé");
-    switch (choice)
-    {
-    case 1:
-        create_game(msgid, getpid());
-        break;
-    case 2:
-        join_game(server_pid);
-        break;
-    case 3:
-        printf("Quitter le jeu\n");
-        break;
-    default:
-        printf("Choix invalide\n");
-        break;
-    }
-    }while(choice != 3);
-    close(tube_fd);
+    do {
+        printf("1. Create a new game\n");
+        printf("2. Join an existing game\n");
+        printf("3. Exit\n");
+        printf("Enter your choice: ");
+        scanf("%d", &choice);
+
+        printf("tube_name = %s\n", tube_name);
+        tube_fd = open_named_pipe(tube_name, O_WRONLY);
+        CHECK(tube_fd, -1, "Erreur lors de l'ouverture du tube nommé");
+
+        switch (choice) {
+            case 1:
+                create_game(msgid, getpid());
+                break;
+            case 2:
+                join_game(server_pid);
+                break;
+            case 3:
+                printf("Quitter le jeu\n");
+                break;
+            default:
+                printf("Choix invalide\n");
+                break;
+        }
+    } while (choice != 3);
+
+    close_pipe(tube_fd);
+
     // Détachement de la mémoire partagée
     CHECK(shmdt(shm_ptr), -1, "Erreur lors du détachement de la mémoire partagée");
+
     return 0;
 }
+
 Partie *recuperer_infos_partie(int partie_id) {
     // Ouverture du sémaphore
     sem_t *semaphore = sem_open(SEMAPHORE_NAME, O_RDWR);
@@ -276,13 +337,14 @@ Partie *recuperer_infos_partie(int partie_id) {
             break;
         }
     }
+    // Afficher les informations de la partie
+    printf("Informations de la partie:\n");
     if (partie_rejointe == NULL) {
         printf("Erreur: Impossible de trouver la partie dans la mémoire partagée.\n");
         shmdt(shm_ptr);
         return NULL;
     }
 
-    shmdt(shm_ptr);
     sem_close(semaphore);
     return partie_rejointe;
 }

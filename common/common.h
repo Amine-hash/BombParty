@@ -16,6 +16,8 @@
 #include <pthread.h>
 #include <sys/msg.h>
 // Incluez ici tous les fichiers d'en-tête nécessaires
+#include "tubes.h"
+
 #include "game_structures.h"
 #include "constants.h"
 #include "gestion_dictionnaire.h"

@@ -6,26 +6,19 @@ pid_t client_pids[MAX_PLAYERS];
 int num_clients = 0;
 int num_parties = 0;
 char *shm_ptr;
-char lettres_a_jouer;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t notify_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
-void create_named_pipe(const char *tube_name) {
-    if (access(tube_name, F_OK) == 0) {
-        CHECK(unlink(tube_name), -1, "Erreur lors de la suppression de l'ancien tube nommé");
-    }
-    CHECK(mkfifo(tube_name, 0666), -1, "Erreur lors de la création du tube nommé");
-}
-
 void send_confirmation(const char *tube_name, const char *message) {
-    int confirm_tube = open(tube_name, O_WRONLY);
+    int confirm_tube = open_named_pipe(tube_name, O_WRONLY);
     CHECK(confirm_tube, -1, "Erreur lors de l'ouverture du tube nommé pour confirmation");
-    write(confirm_tube, message, strlen(message) + 1);
-    close(confirm_tube);
+    CHECK(write_to_pipe(confirm_tube, message, strlen(message) + 1), -1, "Erreur lors de l'écriture dans le tube nommé pour confirmation");
+    close_pipe(confirm_tube);
 }
 
-void handle_new_game(char *buffer, const char *tube_name) {
+
+void handle_new_game(char *buffer) {
     int msgid;
     sscanf(buffer, "NewGame|%d", &msgid);
 
@@ -58,17 +51,16 @@ void notify_players(Partie *partie, const char *pseudo) {
     pthread_mutex_lock(&notify_mutex);
     for (int j = 0; j < partie->nombre_joueur_courant; j++) {
         printf("Envoi d'une notification de joueur à %s.\n", partie->joueurs[j].pseudo);
-        int player_tube = open(partie->joueurs[j].tube_name, O_WRONLY);
+        int player_tube = open_named_pipe(partie->joueurs[j].tube_name, O_WRONLY);
         printf("tube_name : %s\n", partie->joueurs[j].tube_name);
         printf("player_tube : %d\n", player_tube);
         if (player_tube != -1) {
             char player_message[256];
             snprintf(player_message, sizeof(player_message), "PlayerJoin|%s", pseudo);
-            if (write(player_tube, player_message, strlen(player_message) + 1) == -1) {
+            if (write_to_pipe(player_tube, player_message, strlen(player_message) + 1) == -1) {
                 perror("Erreur lors de l'écriture dans le tube nommé");
             }
-            sleep(1); // attendre 1 seconde pour permettre au client de lire le message
-            close(player_tube);
+            close_pipe(player_tube);
         } else {
             printf("Erreur lors de l'ouverture du tube nommé pour notification de joueur (%s).\n", partie->joueurs[j].tube_name);
         }
@@ -132,72 +124,128 @@ void *client_thread(void *arg) {
     create_named_pipe(tube_name);
 
     CHECK(sem_post(semaphore), -1, "Erreur lors de la libération du sémaphore");
+    int tube = open_named_pipe(tube_name, O_RDONLY);
+    CHECK(tube, -1, "Erreur lors de l'ouverture du tube nommé");
 
-    while (1) {
-        int tube = open(tube_name, O_RDONLY); 
-        CHECK(tube, -1, "Erreur lors de l'ouverture du tube nommé");
-
-        char buffer[256];
-        ssize_t bytes_read = read(tube, buffer, sizeof(buffer));
-        if (bytes_read > 0) {
-            if (strncmp(buffer, "NewGame", 7) == 0) {
-                handle_new_game(buffer, tube_name);
-            } else if (strncmp(buffer, "JoinGame", 8) == 0) {
-                handle_join_game(buffer, tube_name, pid);
-            }
+    char buffer[256];
+    ssize_t bytes_read = read_from_pipe(tube, buffer, sizeof(buffer));
+    if (bytes_read > 0) {
+        if (strncmp(buffer, "NewGame", 7) == 0) {
+            handle_new_game(buffer);
+        } else if (strncmp(buffer, "JoinGame", 8) == 0) {
+            handle_join_game(buffer, tube_name, pid);
         }
-        close(tube);
     }
     return NULL;
 }
 void *game_thread(void *arg) {
     Partie *partie = (Partie *) arg;
+        // créer un nom de semaphore unique à la partie à l'aide du pid du premier joueur
+    char semaphore_name[50];
+    char semaphore_name2[50];
+    char semaphore_name3[50];
+    char semaphore_name4[50];
+    snprintf(semaphore_name, sizeof(semaphore_name), "%s_%d", SEMAPHORE_NAME, partie->joueurs[0].id);
+    snprintf(semaphore_name2, sizeof(semaphore_name2), "%s_%d_mot", SEMAPHORE_NAME, partie->joueurs[0].id);
+    snprintf(semaphore_name3, sizeof(semaphore_name4), "%s_%d_reponse", SEMAPHORE_NAME, partie->joueurs[0].id);
+
+    sem_t *partie_semaphore = sem_open(semaphore_name, O_CREAT, 0666, 0);
+    if (partie_semaphore == SEM_FAILED) {
+        perror("Erreur lors de la création du sémaphore de la partie");
+        pthread_exit(NULL);
+    }
+    sem_t * mot_semaphore = sem_open(semaphore_name2, O_CREAT, 0666, 0);
+    if (mot_semaphore == SEM_FAILED) {
+        perror("Erreur lors de la création du sémaphore de la partie");
+        pthread_exit(NULL);
+    }
+    sem_t * partie_reponse_semaphore = sem_open(semaphore_name3, O_CREAT, 0666, 0);
+    if (partie_reponse_semaphore == SEM_FAILED) {
+        perror("Erreur lors de la création du sémaphore de la partie");
+        pthread_exit(NULL);
+    }
     printf("Thread de la partie %d démarré.\n", partie->id);
-    // Gérer la logique du jeu ici...
-    // envoyer un signal SIGUSR1 à chaque joueur pour commencer le jeu
+
+    // Envoyer un signal SIGUSR1 à chaque joueur pour commencer le jeu
     for (int i = 0; i < partie->nombre_joueur_courant; i++) {
         printf("Envoi d'un signal la partie va commencer au joueur %d.\n", partie->joueurs[i].id);
         kill(partie->joueurs[i].id, SIGUSR1);
     }
+
     printf("La partie a démarré.\n");
     printf("Lancement du jeu dans 10 secondes...\n");
-    for (int i = 10; i >= 0; i--) {
+    for (int i = 3; i >= 0; i--) {
         printf("%d.....", i);
         fflush(stdout);
         sleep(1);
     }
-    while(1){   
-        // Écrire le message pour le joueur dans le tube
-    HashTable* groupes_lettres_utilisés = createTable();
-    generer_groupe_lettres_array(lettres_a_jouer, dictionnaire_array, taille_dictionnaire_array,groupes_lettres_utilisés);
-    insert(groupes_lettres_utilisés,lettres_a_jouer,1);
-    for (int i = 0; i < partie->nombre_joueur_courant; i++) {
-        int tube_joueur= open(partie->joueurs[i].tube_name, O_WRONLY);
-        write(tube_joueur,lettres_a_jouer, strlen(lettres_a_jouer) + 1);
-        printf(lettres_a_jouer);
-        close(tube_joueur);
+
+    while (1) {
+        char lettres_a_jouer[MAX_LONGUEUR_MOT];
+        // Gérer les lettres à jouer
+        HashTable *groupes_lettres_utilisés = createTable();
+        // Gérer les tours des joueurs
+        for (int i = 0; i < partie->nombre_joueur_courant; i++) {
+            generer_groupe_lettres_array(lettres_a_jouer, dictionnaire_array, taille_dictionnaire_array, groupes_lettres_utilisés);
+            insert(groupes_lettres_utilisés, lettres_a_jouer, 1);
+            // Envoyer les lettres à chaque joueur
+            for (int i = 0; i < partie->nombre_joueur_courant; i++) {
+                int tube_joueur = open_named_pipe(partie->joueurs[i].tube_name, O_WRONLY);
+                if (tube_joueur == -1) {
+                    perror("Erreur lors de l'ouverture du tube nommé pour l'écriture");
+                    continue;
+                }
+                write_to_pipe(tube_joueur, lettres_a_jouer, strlen(lettres_a_jouer) + 1);
+                sem_wait(partie_semaphore);
+                close_pipe(tube_joueur);
+            }
+            kill(partie->joueurs[i].id, SIGUSR2);
+            printf("\nLettres à jouer : %s\n", lettres_a_jouer);
+            int tube_mot_joué = open_named_pipe(partie->joueurs[i].tube_name, O_RDWR);
+            printf("Envoi d'un signal c'est à toi de jouer au joueur %d.\n", partie->joueurs[i].id);
+
+            char mot_joué[MAX_LONGUEUR_MOT];
+            do {
+                if (tube_mot_joué == -1) {
+                    perror("Erreur lors de l'ouverture du tube nommé pour la lecture");
+                    continue;
+                }
+                ssize_t bytes_read;
+                printf("Attente du mot joué du joueur %s...\n", partie->joueurs[i].pseudo);
+                sem_wait(partie_semaphore); // Wait before reading
+                printf("Lecture du mot joué\n");
+                bytes_read = read_from_pipe(tube_mot_joué, mot_joué, sizeof(mot_joué));
+                //get the semaphore value
+                if (bytes_read > 0) {
+                    mot_joué[bytes_read] = '\0'; // Terminer le buffer avec un caractère null
+                    if (!mot_existe(mot_joué, dictionnaire) || strstr(mot_joué, lettres_a_jouer) == NULL) {
+                        printf("Le joueur %s a joué le mot %s (incorrect).\n", partie->joueurs[i].pseudo, mot_joué);
+                        write_to_pipe(tube_mot_joué, "Réponse incorrecte, essayez encore", strlen("Réponse incorrecte, essayez encore") + 1);
+                        sem_post(partie_reponse_semaphore);
+                    } else {
+                        printf("Envoi d'une confirmation de mot correct au joueur %s.\n", partie->joueurs[i].pseudo);
+                        write_to_pipe(tube_mot_joué, "Correct", strlen("Correct") + 1);
+                        sem_post(partie_reponse_semaphore);
+                    }
+                } else {
+                    printf("bytes_read = %ld\n", bytes_read);
+                    perror("Erreur lors de la lecture du mot joué");
+                }
+            } while (!mot_existe(mot_joué, dictionnaire) || strstr(mot_joué, lettres_a_jouer) == NULL);
+            printf("Le joueur %s a joué le mot %s (correct).\n", partie->joueurs[i].pseudo, mot_joué);
+            sem_wait(mot_semaphore);
+            printf("Le joueur %s a réussi à jouer le mot %s.\n", partie->joueurs[i].pseudo, mot_joué);
+            close_pipe(tube_mot_joué);
+        }
+        // Libérer les ressources de la table de hachage
+        freeTable(groupes_lettres_utilisés);
     }
-    for(int i = 0; i < partie->nombre_joueur_courant; i++){
-        printf("Envoi d'un signal c'est à toi de jouer au joueur %d.\n", partie->joueurs[i].id);
-        kill(partie->joueurs[i].id, SIGUSR2);
-        char mot_joué;
-        int tube_reponse;
-        do{
-            int tube_mot_joué= open(partie->joueurs[i].tube_name, O_RDONLY);
-            read(tube_mot_joué, mot_joué, sizeof(mot_joué));
-            close(tube_mot_joué);
-            tube_reponse= open(partie->joueurs[i].tube_name, O_WRONLY);
-            write(tube_reponse, "Réponse incorrect, essai encore", strlen(lettres_a_jouer) + 1);
-        }while (!(mot_existe(mot_joué, dictionnaire))|| strstr(mot_joué, lettres_a_jouer) == NULL);
-        write(tube_reponse, "Correct", strlen(lettres_a_jouer) + 1);
-        close(tube_reponse);
-    }
-    pthread_exit(NULL);
-}
+    sem_close(partie_semaphore);
+    return NULL;
 }
 
 
-void signal_handler(int sig, siginfo_t *info, void *context){
+void signal_handler(int sig, siginfo_t *info, void *context) {
     if (sig == SIGUSR1) {
         pid_t pid = info->si_pid;
 
