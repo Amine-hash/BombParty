@@ -204,6 +204,7 @@ void *client_game_handler(void *arg) {
             scanf("%255s", buffer2); // Limiter la lecture à 255 caractères
             write_to_pipe(tube_fd, buffer2, strlen(buffer2) + 1);
             sem_post(semaphore_partie); // Signal after writing
+            sem_wait(semaphore_reponse); // Wait for the response
             while ((bytes_read = read_from_pipe(tube_fd, reponse, sizeof(reponse) - 1)) <= 0);
             printf("Reponse recue\n");
             if (bytes_read > 0) {
@@ -212,6 +213,7 @@ void *client_game_handler(void *arg) {
                     printf("Mot correct\n");
                 } else {
                     printf("Mot incorrect\n");
+                    printf("Groupe de lettres : %s\n", groupe_lettres_client);
                 }
             } else {
                 perror("Erreur lors de la lecture de la réponse");

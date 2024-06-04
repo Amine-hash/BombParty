@@ -315,12 +315,13 @@ int verifier_presence_groupe_lettres_array(const char *groupe_lettres, char *dic
 void generer_groupe_lettres_array(char *groupe_lettres, char *dictionnaire[], int taille_dictionnaire, HashTable* groupe_lettres_utilisé) {
     // Générer un groupe de lettres aléatoires à partir d'un tableau de mots
     do{
-        memset(groupe_lettres, 0, strlen(groupe_lettres));
+        memset(groupe_lettres, 0, MAX_LONGUEUR_MOT);
         int index = rand() % taille_dictionnaire;
         char mot[MAX_LONGUEUR_MOT];
         convertir_caracteres_speciaux(dictionnaire[index]);
         strcpy(mot, dictionnaire[index]);
         int mot_length = strlen(mot);
+        if (mot_length < 2) continue;
         int len = rand() % 4 + 2; // entre 2 et 5
         int start = rand() % (mot_length - len + 1);
         strncpy(groupe_lettres, &(mot[start]), len);

@@ -3,7 +3,7 @@
 #include "common.h"
 
 #define TABLE_SIZE 1000000
-#define MAX_LONGUEUR_MOT 50
+#define MAX_LONGUEUR_MOT 100
 // Structure pour représenter un nœud de la liste chaînée
 struct node {
     char key[MAX_LONGUEUR_MOT];

@@ -236,6 +236,8 @@ void *game_thread(void *arg) {
             sem_wait(mot_semaphore);
             printf("Le joueur %s a réussi à jouer le mot %s.\n", partie->joueurs[i].pseudo, mot_joué);
             close_pipe(tube_mot_joué);
+            memset(mot_joué, 0, sizeof(mot_joué));
+            memset(lettres_a_jouer, 0, sizeof(lettres_a_jouer));
         }
         // Libérer les ressources de la table de hachage
         freeTable(groupes_lettres_utilisés);
