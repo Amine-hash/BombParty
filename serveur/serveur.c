@@ -188,19 +188,26 @@ void *game_thread(void *arg) {
         // Gérer les lettres à jouer
         HashTable *groupes_lettres_utilisés = createTable();
         // Gérer les tours des joueurs
-        for (int i = 0; i < partie->nombre_joueur_courant && partie->joueurs[i].etat != PERDU; i++) {
+        for (int i = 0; i < partie->nombre_joueur_courant; i++) {
+            if(partie->joueurs[i].etat == PERDU){
+                continue;
+            }
             generer_groupe_lettres_array(lettres_a_jouer, dictionnaire_array, taille_dictionnaire_array, groupes_lettres_utilisés);
             insert(groupes_lettres_utilisés, lettres_a_jouer, 1);
             // Envoyer les lettres à chaque joueur
             for (int i = 0; i < partie->nombre_joueur_courant; i++) {
+                if(partie->joueurs[i].etat != PERDU){
+                printf("Envoi des lettres à jouer au joueur %s.\n", partie->joueurs[i].pseudo);
                 int tube_joueur = open_named_pipe(partie->joueurs[i].tube_name, O_WRONLY);
                 if (tube_joueur == -1) {
                     perror("Erreur lors de l'ouverture du tube nommé pour l'écriture");
                     continue;
                 }
                 write_to_pipe(tube_joueur, lettres_a_jouer, strlen(lettres_a_jouer) + 1);
+                printf("Lettres à jouer : %s\n", lettres_a_jouer);
                 sem_wait(partie_semaphore);
                 close_pipe(tube_joueur);
+                }
             }
             kill(partie->joueurs[i].id, SIGUSR2);
             printf("\nLettres à jouer : %s\n", lettres_a_jouer);
@@ -228,6 +235,8 @@ void *game_thread(void *arg) {
                 }
                 if(strncmp(mot_joué, "PlayerOut", 9) == 0){
                     printf("Le joueur %s a perdu la partie.\n", partie->joueurs[i].pseudo);
+                    FLAG_TIMER = 1;
+                    partie->joueurs[i].etat = PERDU;
                     write_to_pipe(tube_mot_joué, "Perdu", strlen("Perdu") + 1);
                     sem_post(partie_reponse_semaphore);
                     break;
@@ -253,15 +262,19 @@ void *game_thread(void *arg) {
             // Vérifier si tous les joueurs ont perdu
             printf("Vérification des joueurs actifs...\n");
             int joueurs_actifs = 0;
+            int id_joueur_en_jeu=0;
             for (int i = 0; i < partie->nombre_joueur_courant; i++) {
                 if (partie->joueurs[i].etat != PERDU) {
                     joueurs_actifs++;
+                    id_joueur_en_jeu = i;
                 }
             }
+            printf("Nombre de joueurs actifs : %d\n", joueurs_actifs);
             if (joueurs_actifs == 1) {
                 printf("Il ne reste qu'un seul joueur dans la partie.\n");
                 FLAG_PARTIE = 1;
-                break;
+                kill(partie->joueurs[id_joueur_en_jeu].id, SIGRTMIN);
+                pthread_exit(NULL);
             }
             if(FLAG_TIMER == 1){
                 FLAG_TIMER = 0;

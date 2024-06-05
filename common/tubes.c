@@ -9,11 +9,14 @@ int create_named_pipe(const char *path) {
 }
 
 int open_named_pipe(const char *path, int flags) {
-    int fd = open(path, flags);
+    int fd;
+    do{
+    fd = open(path, flags);
     if (fd == -1 && errno != EINTR) {
         perror("open");
         return -1;
     }
+    }while(errno == EINTR);
     return fd;
 }
 

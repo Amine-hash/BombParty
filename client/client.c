@@ -7,6 +7,7 @@ volatile sig_atomic_t FLAG_TOUR_JOUEUR = 0;
 volatile sig_atomic_t FLAG_TIMEOUT = 0;
 volatile sig_atomic_t FLAG_SERVEUR_WORKING = 0;
 volatile sig_atomic_t FLAG_TIMEOUT_SRV = 0;
+volatile sig_atomic_t FLAG_PARTIE = 1;
 void create_game(int msgid, pid_t pid) {
     char use_defaults;
     Message message;
@@ -14,7 +15,6 @@ void create_game(int msgid, pid_t pid) {
     message.partie.id = rand();
     message.partie.nombre_joueur_courant = 1; // Le créateur de la partie est le premier joueur
     message.partie.joueurs[0].id = pid;
-    message.partie.joueurs[0].nombre_vie = DEFAULT_VIES;
     message.partie.joueurs[0].etat = EN_ATTENTE;
     strcpy(message.partie.joueurs[0].tube_name, tube_name);
     printf("Entrez votre pseudo: ");
@@ -32,7 +32,7 @@ void create_game(int msgid, pid_t pid) {
         printf("Entrez le nombre de joueurs : ");
         scanf("%d", &message.partie.nombre_joueur_max);
     }
-
+    message.partie.joueurs[0].nombre_vie = message.partie.nombre_vies;
     CHECK(msgsnd(msgid, &message, sizeof(Partie), 0), -1, "Erreur lors de l'envoi du message à la BAL");
 
     Partie *partie = malloc(sizeof(Partie));
@@ -52,6 +52,7 @@ void create_game(int msgid, pid_t pid) {
     message.partie.joueurs[0].etat = EN_JEU;
     pthread_create(&game_thread, NULL, client_game_handler, partie);
     pthread_join(game_thread, NULL);
+    exit(EXIT_SUCCESS);
 }
 
 void join_game() {
@@ -127,12 +128,16 @@ void join_game() {
 }
 void timeout_handler(int signum) {
     if (signum == SIGALRM) {
-        printf("\nTemps écoulé ! Vous perdez une vie.\n");
         if(FLAG_SERVEUR_WORKING == 0)
             FLAG_TIMEOUT = 1;
         else
             FLAG_TIMEOUT_SRV = 1;
-        fflush(stdout);
+        printf("\n");
+        printf("Appuyer sur entrée\n");
+    }
+    if (signum == SIGRTMIN) {
+        printf("Vous avez gagnez la partie\n");
+        FLAG_PARTIE = 0;
     }
 }
 void read_input(char *buffer, size_t size) {
@@ -173,6 +178,7 @@ void *client_game_handler(void *arg) {
     sigemptyset(&action.sa_mask);
     action.sa_flags = 0;
     sigaction(SIGALRM, &action, NULL);
+    sigaction(SIGRTMIN, &action, NULL);
     // créer un nom de semaphore unique à la partie à l'aide du pid du premier joueur
     char semaphore_name[50];
     char semaphore_name2[50];
@@ -227,9 +233,8 @@ void *client_game_handler(void *arg) {
         sleep(1);
     }
     printf("\n");
-    int FLAG_PARTIE=1;
     while (FLAG_PARTIE) {
-        tube_fd = open_named_pipe(tube_name, O_RDWR);
+        tube_fd = open_named_pipe(tube_name, O_RDWR | O_NONBLOCK);
         if (tube_fd == -1) {
             perror("Erreur lors de l'ouverture du tube nommé pour le groupe de lettres");
             sem_close(semaphore_partie);
@@ -237,7 +242,11 @@ void *client_game_handler(void *arg) {
         }
 
         char groupe_lettres_client[10];
-        while ((bytes_read = read_from_pipe(tube_fd, groupe_lettres_client, sizeof(groupe_lettres_client) - 1)) <= 0);
+        while ((bytes_read = read_from_pipe(tube_fd, groupe_lettres_client, sizeof(groupe_lettres_client) - 1)) <= 0 && FLAG_PARTIE == 1);
+        if(FLAG_PARTIE == 0){
+            close_pipe(tube_fd);
+            pthread_exit(NULL);
+        }
         sem_post(semaphore_partie); // Signal after reading
         groupe_lettres_client[bytes_read] = '\0'; // Null-terminate the buffer
         printf("Groupe de lettres : %s\n", groupe_lettres_client);
@@ -263,13 +272,11 @@ void *client_game_handler(void *arg) {
             printf("Temps écoulé !!!! Vous perdez une vie.\n");
             break;
         }
-        printf("Envoi du mot au serveur\n");
         FLAG_SERVEUR_WORKING = 1;
         write_to_pipe(tube_fd, buffer2, strlen(buffer2) + 1);
         sem_post(semaphore_partie); // Signal after writing
         sem_wait(semaphore_reponse); // Wait for the response
         while ((bytes_read = read_from_pipe(tube_fd, reponse, sizeof(reponse) - 1)) <= 0);
-        printf("Reponse recue\n");
         if (bytes_read > 0) {
             reponse[bytes_read] = '\0'; // Null-terminate the buffer
             if (strncmp(reponse, "Correct", 7) == 0) {
@@ -295,31 +302,27 @@ void *client_game_handler(void *arg) {
             for(int i = 0; i < partie->nombre_joueur_courant; i++){
                 if(partie->joueurs[i].id == getpid()){
                     //afficher info joueur
-                    printf("nombre_vie = %d\n", partie->joueurs[i].nombre_vie);
-                    printf("etat = %d\n", partie->joueurs[i].etat);
                     partie->joueurs[i].nombre_vie -= 1;
                     if (partie->joueurs[i].nombre_vie <= 0) {
                         printf("Vous avez perdu toutes vos vies !\n");
                         partie->joueurs[i].etat = PERDU;
                         // Envoyer un message au serveur pour indiquer la perte de toutes les vies
                         snprintf(buffer3, sizeof(buffer3), "PlayerOut|%d", partie->id);
-                        printf("buffer3 = %s\n", buffer3);
                         write_to_pipe(tube_fd, buffer3, strlen(buffer3) + 1);
                         sem_post(semaphore_partie);
                         sem_wait(semaphore_reponse);
                         read_from_pipe(tube_fd, buffer3, sizeof(buffer3) - 1);
-                        printf("buffer3 = %s\n", buffer3);
                         FLAG_PARTIE = 0;
+                        sem_post(semaphore_mot);
                         pthread_exit(NULL);
                     } else {
                         printf("Vous avez perdu une vie !\n");
+                        printf("Vies restantes : %d\n", partie->joueurs[i].nombre_vie);
                         snprintf(buffer3, sizeof(buffer3), "PlayerLostLife|%d", partie->id);
-                        printf("buffer3 = %s\n", buffer3);
                         write_to_pipe(tube_fd, buffer3, strlen(buffer3) + 1);
                         sem_post(semaphore_partie);
                         sem_wait(semaphore_reponse);
                         read_from_pipe(tube_fd, buffer3, sizeof(buffer3) - 1);
-                        printf("buffer3 = %s\n", buffer3);
                     }
                     break;
                 }
