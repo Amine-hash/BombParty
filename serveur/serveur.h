@@ -3,6 +3,8 @@
 
 #include "../common/common.h"
 #define FILENAME "../dictionnaire/Français_v2.txt"
+#define MIN_TEMPS_BOMBE 15 // Le temps minimum avant que la bombe explose
+#define MAX_TEMPS_BOMBE 30 // Le temps maximum avant que la bombe explose
 
 HashTable* dictionnaire;
 HashTable* groupes_lettres;

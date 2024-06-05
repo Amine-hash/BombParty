@@ -33,6 +33,7 @@ struct Partie {
     int id;
     int etat;
     int nombre_vies;
+    float temps_bombe;
 };
 #define Partie struct Partie
 typedef struct Message {

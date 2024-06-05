@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/time.h>
 #include <sys/shm.h>
 #include <errno.h>
 #include <sys/wait.h>

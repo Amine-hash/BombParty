@@ -321,7 +321,9 @@ void generer_groupe_lettres_array(char *groupe_lettres, char *dictionnaire[], in
         convertir_caracteres_speciaux(dictionnaire[index]);
         strcpy(mot, dictionnaire[index]);
         int mot_length = strlen(mot);
-        if (mot_length < 2) continue;
+        if(mot_length < 2) {
+            continue;
+        }
         int len = rand() % 4 + 2; // entre 2 et 5
         int start = rand() % (mot_length - len + 1);
         strncpy(groupe_lettres, &(mot[start]), len);

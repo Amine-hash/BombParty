@@ -4,9 +4,26 @@ int tube_fd;
 char tube_name[MAX_TUBE_NAME_LENGTH];
 volatile sig_atomic_t FLAG_DEMARRAGE_PARTIE = 0;
 volatile sig_atomic_t FLAG_TOUR_JOUEUR = 0;
-volatile sig_atomic_t FLAG_TIMEOUT = 0;
-volatile sig_atomic_t FLAG_SERVEUR_WORKING = 0;
-volatile sig_atomic_t FLAG_TIMEOUT_SRV = 0;
+volatile sig_atomic_t FLAG_FIN_PARTIE = 0;
+volatile sig_atomic_t FLAG_BOMBE = 0;
+
+void read_input(char *buffer, size_t size) {
+    ssize_t bytes_read;
+    do {
+        bytes_read = read(STDIN_FILENO, buffer, size - 1);
+        if (bytes_read == -1) {
+            if (errno == EINTR) {
+                // Lecture interrompue par un signal, réessayer
+                printf("Lecture interrompue par un signal, réessayez\n");
+                break;
+            } else {
+                perror("Erreur lors de la lecture de l'entrée");
+                exit(EXIT_FAILURE);
+            }
+        }
+        buffer[bytes_read] = '\0';
+    } while (bytes_read == -1);
+}
 void create_game(int msgid, pid_t pid) {
     char use_defaults;
     Message message;
@@ -49,7 +66,6 @@ void create_game(int msgid, pid_t pid) {
     close_pipe(tube_fd);
 
     pthread_t game_thread;
-    message.partie.joueurs[0].etat = EN_JEU;
     pthread_create(&game_thread, NULL, client_game_handler, partie);
     pthread_join(game_thread, NULL);
 }
@@ -125,54 +141,9 @@ void join_game() {
     }
     exit(EXIT_SUCCESS);
 }
-void timeout_handler(int signum) {
-    if (signum == SIGALRM) {
-        printf("\nTemps écoulé ! Vous perdez une vie.\n");
-        if(FLAG_SERVEUR_WORKING == 0)
-            FLAG_TIMEOUT = 1;
-        else
-            FLAG_TIMEOUT_SRV = 1;
-        fflush(stdout);
-    }
-}
-void read_input(char *buffer, size_t size) {
-    ssize_t bytes_read;
-    do {
-        bytes_read = read(STDIN_FILENO, buffer, size - 1);
-        if (bytes_read == -1) {
-            if (errno == EINTR) {
-                // Lecture interrompue par un signal, réessayer
-                printf("Lecture interrompue par un signal, réessayez\n");
-                break;
-            } else {
-                perror("Erreur lors de la lecture de l'entrée");
-                exit(EXIT_FAILURE);
-            }
-        }
-        buffer[bytes_read] = '\0';
-    } while (bytes_read == -1);
-    fflush(stdout);
-}
-void start_timer() {
-    struct itimerval timer;
-    timer.it_value.tv_sec = 10;
-    timer.it_value.tv_usec = 0;
-    timer.it_interval.tv_sec = 0;
-    timer.it_interval.tv_usec = 0;
-    setitimer(ITIMER_REAL, &timer, NULL);
-}
 
-void stop_timer() {
-    struct itimerval timer = { {0, 0}, {0, 0} };
-    setitimer(ITIMER_REAL, &timer, NULL);
-}
 void *client_game_handler(void *arg) {
     Partie *partie = (Partie *)arg;
-    struct sigaction action;
-    action.sa_handler = timeout_handler;
-    sigemptyset(&action.sa_mask);
-    action.sa_flags = 0;
-    sigaction(SIGALRM, &action, NULL);
     // créer un nom de semaphore unique à la partie à l'aide du pid du premier joueur
     char semaphore_name[50];
     char semaphore_name2[50];
@@ -227,8 +198,8 @@ void *client_game_handler(void *arg) {
         sleep(1);
     }
     printf("\n");
-    int FLAG_PARTIE=1;
-    while (FLAG_PARTIE) {
+    while (FLAG_FIN_PARTIE == 0) {
+        printf("En attente de votre tour\n");
         tube_fd = open_named_pipe(tube_name, O_RDWR);
         if (tube_fd == -1) {
             perror("Erreur lors de l'ouverture du tube nommé pour le groupe de lettres");
@@ -237,8 +208,16 @@ void *client_game_handler(void *arg) {
         }
 
         char groupe_lettres_client[10];
-        while ((bytes_read = read_from_pipe(tube_fd, groupe_lettres_client, sizeof(groupe_lettres_client) - 1)) <= 0);
-        sem_post(semaphore_partie); // Signal after reading
+        while ((bytes_read = read_from_pipe(tube_fd, groupe_lettres_client, sizeof(groupe_lettres_client) - 1)) <= 0 && FLAG_BOMBE == 0 && FLAG_FIN_PARTIE == 0);
+        if(FLAG_FIN_PARTIE == 1){
+            break;
+        }
+        if(FLAG_BOMBE == 1){
+            printf("La bombe a explosé\n");
+            sem_post(semaphore_partie); // Signal after reading
+            FLAG_BOMBE = 0;
+            continue;
+        }
         groupe_lettres_client[bytes_read] = '\0'; // Null-terminate the buffer
         printf("Groupe de lettres : %s\n", groupe_lettres_client);
         usleep(100000);
@@ -247,86 +226,64 @@ void *client_game_handler(void *arg) {
             continue;
         }
         char reponse[256];
-        int mot_correct = 0;
-
-        do {
-        FLAG_TIMEOUT = 0;
-        start_timer();
-        char buffer2[256];
-        printf("Entrez un mot: ");
-        fflush(stdout);
-        read_input(buffer2, sizeof(buffer2));
-        sscanf(buffer2, "%s", buffer2);
-        fflush(stdout);
-        if(FLAG_TIMEOUT){
-            stop_timer();
-            printf("Temps écoulé !!!! Vous perdez une vie.\n");
-            break;
-        }
-        printf("Envoi du mot au serveur\n");
-        FLAG_SERVEUR_WORKING = 1;
-        write_to_pipe(tube_fd, buffer2, strlen(buffer2) + 1);
-        sem_post(semaphore_partie); // Signal after writing
-        sem_wait(semaphore_reponse); // Wait for the response
-        while ((bytes_read = read_from_pipe(tube_fd, reponse, sizeof(reponse) - 1)) <= 0);
-        printf("Reponse recue\n");
-        if (bytes_read > 0) {
-            reponse[bytes_read] = '\0'; // Null-terminate the buffer
-            if (strncmp(reponse, "Correct", 7) == 0) {
-                printf("Mot correct\n");
-                mot_correct = 1;
-                stop_timer();   
+         do {
+            char buffer2[256];
+            if (FLAG_BOMBE == 1 || FLAG_FIN_PARTIE == 1) {
+                break;
+            }
+            printf("Entrez un mot: ");
+            fflush(stdout);
+            read_input(buffer2, sizeof(buffer2));
+            sscanf(buffer2, "%s", buffer2);
+            printf("Mot entré : %s\n", buffer2);
+            if (FLAG_BOMBE == 1 || FLAG_FIN_PARTIE == 1) {
+                break;
+            }            
+            write_to_pipe(tube_fd, buffer2, strlen(buffer2) + 1);
+            sem_post(semaphore_partie); // Signal after writing
+            if (FLAG_BOMBE == 1 || FLAG_FIN_PARTIE == 1) {
+                break;
+            }
+            printf("En attente de la réponse\n");
+            sem_wait(semaphore_reponse); // Wait for the response
+            while ((bytes_read = read_from_pipe(tube_fd, reponse, sizeof(reponse) - 1)) <= 0 && FLAG_BOMBE == 0 && FLAG_FIN_PARTIE == 0);
+            if(FLAG_BOMBE == 1 || FLAG_FIN_PARTIE == 1){
+                break;
+            }
+            printf("Reponse recue\n");
+            if (bytes_read > 0) {
+                reponse[bytes_read] = '\0'; // Null-terminate the buffer
+                if (strncmp(reponse, "Correct", 7) == 0) {
+                    printf("Mot correct\n");
+                    sem_post(semaphore_mot); // Signal after reading
+                } else {
+                    printf("Mot incorrect\n");
+                    printf("Groupe de lettres : %s\n", groupe_lettres_client);
+                }
             } else {
-                printf("Mot incorrect\n");
-                printf("Groupe de lettres : %s\n", groupe_lettres_client);
-                if(FLAG_TIMEOUT_SRV){
-                    FLAG_TIMEOUT = 1;
-                }
+                perror("Erreur lors de la lecture de la réponse");
             }
-        } else {
-            perror("Erreur lors de la lecture de la réponse");
+        } while (strncmp(reponse, "Correct", 7) != 0 && FLAG_BOMBE == 0);
+        printf("Fin du tour\n");
+        if(FLAG_BOMBE == 1){
+            printf("La bombe a explosé\n");
         }
-        FLAG_SERVEUR_WORKING = 0;
-        FLAG_TIMEOUT_SRV = 0;
-    } while (!mot_correct);
-    if (FLAG_TIMEOUT) {
-            //trouver le joueur
-            char buffer3[256];
-            for(int i = 0; i < partie->nombre_joueur_courant; i++){
-                if(partie->joueurs[i].id == getpid()){
-                    //afficher info joueur
-                    printf("nombre_vie = %d\n", partie->joueurs[i].nombre_vie);
-                    printf("etat = %d\n", partie->joueurs[i].etat);
-                    partie->joueurs[i].nombre_vie -= 1;
-                    if (partie->joueurs[i].nombre_vie <= 0) {
-                        printf("Vous avez perdu toutes vos vies !\n");
-                        partie->joueurs[i].etat = PERDU;
-                        // Envoyer un message au serveur pour indiquer la perte de toutes les vies
-                        snprintf(buffer3, sizeof(buffer3), "PlayerOut|%d", partie->id);
-                        printf("buffer3 = %s\n", buffer3);
-                        write_to_pipe(tube_fd, buffer3, strlen(buffer3) + 1);
-                        sem_post(semaphore_partie);
-                        sem_wait(semaphore_reponse);
-                        read_from_pipe(tube_fd, buffer3, sizeof(buffer3) - 1);
-                        printf("buffer3 = %s\n", buffer3);
-                        FLAG_PARTIE = 0;
-                        pthread_exit(NULL);
-                    } else {
-                        printf("Vous avez perdu une vie !\n");
-                        snprintf(buffer3, sizeof(buffer3), "PlayerLostLife|%d", partie->id);
-                        printf("buffer3 = %s\n", buffer3);
-                        write_to_pipe(tube_fd, buffer3, strlen(buffer3) + 1);
-                        sem_post(semaphore_partie);
-                        sem_wait(semaphore_reponse);
-                        read_from_pipe(tube_fd, buffer3, sizeof(buffer3) - 1);
-                        printf("buffer3 = %s\n", buffer3);
-                    }
-                    break;
-                }
-            }
-        }
-        sem_post(semaphore_mot); // Signal after reading
         FLAG_TOUR_JOUEUR = 0;
+        FLAG_BOMBE = 0;
+    }
+    // regarder l'état du joueur
+    // si le joueur a perdu, envoyer un message au serveur
+    // si le joueur a gagné, envoyer un message au serveur
+    for(int i = 0; i < partie->nombre_joueur_courant; i++){
+        if(partie->joueurs[i].id == getpid()){
+            if(partie->joueurs[i].etat == PERDU){
+                printf("La bombe a explosé\n");
+                printf("Vous avez perdu\n");
+            }
+            else{
+                printf("Vous avez gagné\n");
+            }
+        }
     }
     close_pipe(tube_fd);
     sem_close(semaphore_partie);
@@ -342,6 +299,14 @@ void signal_handler(int signum) {
         printf("C'est à votre tour de jouer.\n");
         FLAG_TOUR_JOUEUR = 1;
     }
+    if(signum == SIGRTMIN){
+        printf("\nLa bombe a explosé\n");
+        FLAG_BOMBE = 1;     
+    }
+    if(signum == SIGRTMAX){
+        printf("\nLa partie est terminée\n");
+        FLAG_FIN_PARTIE = 1;
+    }
 }
 
 int main() {
@@ -351,9 +316,11 @@ int main() {
     struct sigaction action;
     action.sa_handler = signal_handler;
     sigemptyset(&action.sa_mask);
-    action.sa_flags = 0;
     CHECK(sigaction(SIGUSR1, &action, NULL), -1, "Erreur lors de l'installation du gestionnaire de signal de SIGUSR1");
     CHECK(sigaction(SIGUSR2, &action, NULL), -1, "Erreur lors de l'installation du gestionnaire de signal de SIGUSR2");
+    CHECK(sigaction(SIGRTMIN, &action, NULL), -1, "Erreur lors de l'installation du gestionnaire de signal de SIGRTMIN");
+    CHECK(sigaction(SIGRTMAX, &action, NULL), -1, "Erreur lors de l'installation du gestionnaire de signal de SIGRTMAX");
+    action.sa_flags = 0;
 
     // Ouverture du sémaphore partagé
     semaphore = sem_open(SEMAPHORE_NAME, O_RDWR); // si le sémaphore n'existe pas, il est créé avec une valeur initiale de 0

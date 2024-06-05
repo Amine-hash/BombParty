@@ -76,31 +76,20 @@ void handle_join_game(char *buffer, const char *tube_name, pid_t pid) {
 
     pthread_mutex_lock(&mutex);
     int partie_trouvee = 0;
+    Partie *partie;
     for (int i = 0; i < num_parties; i++) {
         if (parties[i].id == partie_id) {
-            Partie *partie = &parties[i];
+            partie = &parties[i];
             strcpy(parties[i].joueurs[partie->nombre_joueur_courant].tube_name, tube_name);
             if (partie->nombre_joueur_courant < partie->nombre_joueur_max) {
                 partie->joueurs[partie->nombre_joueur_courant].id = pid;
                 strcpy(partie->joueurs[partie->nombre_joueur_courant].pseudo, pseudo);
-                partie->joueurs[partie->nombre_joueur_courant].nombre_vie = partie->nombre_vies;
-                partie->joueurs[partie->nombre_joueur_courant].etat = EN_JEU;
                 partie->nombre_joueur_courant++;
                 printf("Le joueur %s a rejoint la partie %d.\n", pseudo, partie_id);
-                memcpy(shm_ptr + sizeof(pid_t) + sizeof(int), parties, num_parties * sizeof(Partie));
-
                 char confirm_message[256];
                 snprintf(confirm_message, sizeof(confirm_message), "JoinConfirm|%d|%s", partie_id, pseudo);
                 send_confirmation(tube_name, confirm_message);
-
                 notify_players(partie, pseudo);
-
-                if (partie->nombre_joueur_courant == partie->nombre_joueur_max) {
-                    partie->etat = PARTIE_DEMARREE;
-                    memcpy(shm_ptr + sizeof(pid_t) + sizeof(int), parties, num_parties * sizeof(Partie));
-                    pthread_t thread;
-                    CHECK(pthread_create(&thread, NULL, game_thread, partie), -1, "Erreur lors de la création du thread de la partie");
-                }
                 partie_trouvee = 1;
             } else {
                 printf("La partie %d est pleine.\n", partie_id);
@@ -108,14 +97,19 @@ void handle_join_game(char *buffer, const char *tube_name, pid_t pid) {
             break;
         }
     }
+    pthread_mutex_unlock(&mutex);
     if (!partie_trouvee) {
         printf("La partie avec l'ID %d n'existe pas.\n", partie_id);
-
         char error_message[256];
         snprintf(error_message, sizeof(error_message), "JoinError|%d|%s", partie_id, "ID incorrect ou partie pleine");
         send_confirmation(tube_name, error_message);
     }
-    pthread_mutex_unlock(&mutex);
+    if (partie->nombre_joueur_courant == partie->nombre_joueur_max) {
+            partie->etat = PARTIE_DEMARREE;
+            pthread_t thread;
+            CHECK(pthread_create(&thread, NULL, game_thread, partie), -1, "Erreur lors de la création du thread de la partie");
+            CHECK(pthread_join(thread, NULL), -1, "Erreur lors de la terminaison du thread de la partie");
+    }
 }
 
 void *client_thread(void *arg) {
@@ -140,8 +134,88 @@ void *client_thread(void *arg) {
     }
     return NULL;
 }
+void *thread_bomb(void *arg) {
+    thread_bomb_args* args = (thread_bomb_args*)arg;
+    Partie *partie = args->partie;
+    float *temps_bombe = args->temps_bombe;
+    struct timespec ts;
+    while (1) {
+        pthread_mutex_lock(&mutex);
+        partie->temps_bombe = rand() % (MAX_TEMPS_BOMBE - MIN_TEMPS_BOMBE + 1) + MIN_TEMPS_BOMBE;
+        printf("La bombe va exploser dans %f secondes.\n", partie->temps_bombe);
+        *temps_bombe = partie->temps_bombe;
+        pthread_mutex_unlock(&mutex);
+        while(*temps_bombe > 0){
+                        // Définir le temps de sommeil en secondes et nanosecondes
+            ts.tv_sec = 0;
+            ts.tv_nsec = 100000000;  // 100 millions de nanosecondes = 0.1 seconde
+
+            nanosleep(&ts, NULL);
+            if(*temps_bombe > 0){
+                *temps_bombe -= 0.1;
+            }
+        }
+        printf("La bombe a explosé.\n");
+        pthread_mutex_lock(&mutex);
+        partie->etat = EXPLOSION;
+        pthread_mutex_unlock(&mutex);
+        int nombre_joueur_en_vie = 0;
+        for(int i = 0; i < partie->nombre_joueur_courant; i++) {
+            if(partie->joueurs[i].flag_tour == 1){
+                char semaphore_name[50];
+                snprintf(semaphore_name, sizeof(semaphore_name), "%s_%d", SEMAPHORE_NAME, partie->joueurs[i].id);
+                sem_t *partie_semaphore = sem_open(semaphore_name, O_CREAT, 0666, 0);
+                if (partie_semaphore == SEM_FAILED) {
+                    perror("Erreur lors de la création du sémaphore de la partie");
+                    pthread_exit(NULL);
+                }
+                pthread_mutex_lock(&mutex);
+                partie->joueurs[i].nombre_vie -= 1;
+                if(partie->joueurs[i].nombre_vie == 0){
+                    partie->joueurs[i].etat = PERDU;
+                    kill(partie->joueurs[i].id, SIGRTMAX);
+                }
+                else{
+                    kill(partie->joueurs[i].id, SIGRTMIN);
+                }
+                sem_post(partie_semaphore);
+                pthread_mutex_unlock(&mutex);
+            }
+            else {
+                kill(partie->joueurs[i].id, SIGRTMIN);
+            }
+            if(partie->joueurs[i].etat != PERDU){
+                nombre_joueur_en_vie++;
+            }
+        }
+        if(nombre_joueur_en_vie == 1){
+            for(int i = 0; i < partie->nombre_joueur_courant; i++) {
+                if(partie->joueurs[i].etat != PERDU){
+                    printf("Le joueur %s a gagné la partie.\n", partie->joueurs[i].pseudo);
+                    partie->etat = PARTIE_TERMINEE;
+                    kill(partie->joueurs[i].id, SIGRTMIN);
+                    break;
+                }
+            }
+        }       
+    }
+    return NULL;
+}
+void bomb_signal_handler(int signum) {
+    
+    if (signum == SIGUSR2) {
+    }
+    else {
+        printf("Signal inconnu reçu\n");
+    }
+}
+
 void *game_thread(void *arg) {
     Partie *partie = (Partie *) arg;
+    float temps_bombe;
+    thread_bomb_args arg_thread_bombe;
+    arg_thread_bombe.partie = partie;
+    arg_thread_bombe.temps_bombe = &temps_bombe;
         // créer un nom de semaphore unique à la partie à l'aide du pid du premier joueur
     char semaphore_name[50];
     char semaphore_name2[50];
@@ -181,14 +255,24 @@ void *game_thread(void *arg) {
         fflush(stdout);
         sleep(1);
     }
-    int FLAG_TIMER = 0;
-    int FLAG_PARTIE = 0;
-    while (FLAG_PARTIE == 0) {
-        char lettres_a_jouer[MAX_LONGUEUR_MOT];
-        // Gérer les lettres à jouer
+    pthread_t thread_bombe;
+    CHECK(pthread_create(&thread_bombe, NULL, thread_bomb, &arg_thread_bombe), -1, "Erreur lors de la création du thread de la bombe");
+    while (partie->etat != PARTIE_TERMINEE) {
         HashTable *groupes_lettres_utilisés = createTable();
+        char lettres_a_jouer[MAX_LONGUEUR_MOT];        
         // Gérer les tours des joueurs
         for (int i = 0; i < partie->nombre_joueur_courant && partie->joueurs[i].etat != PERDU; i++) {
+            printf("Le joueur %s est en train de jouer.\n", partie->joueurs[i].pseudo);
+            pthread_mutex_lock(&mutex);
+            partie->etat = PARTIE_DEMARREE;
+            pthread_mutex_unlock(&mutex);
+            if(partie->etat == PARTIE_TERMINEE){
+                break;
+            }
+            if(temps_bombe <=5){
+                //réinitialiser le temps de la bombe pour lai
+                temps_bombe = 5; 
+            }
             generer_groupe_lettres_array(lettres_a_jouer, dictionnaire_array, taille_dictionnaire_array, groupes_lettres_utilisés);
             insert(groupes_lettres_utilisés, lettres_a_jouer, 1);
             // Envoyer les lettres à chaque joueur
@@ -199,12 +283,21 @@ void *game_thread(void *arg) {
                     continue;
                 }
                 write_to_pipe(tube_joueur, lettres_a_jouer, strlen(lettres_a_jouer) + 1);
+                printf("Envoi des lettres à jouer au joueur %s.\n", partie->joueurs[i].pseudo);
+                // afficher valeur du semaphore
+                int value;
+                sem_getvalue(partie_semaphore, &value);
+                printf("Valeur du semaphore : %d\n", value);
                 sem_wait(partie_semaphore);
                 close_pipe(tube_joueur);
             }
+            printf("Envoi d'un signal c'est à toi de jouer au joueur %d.\n", partie->joueurs[i].id);
             kill(partie->joueurs[i].id, SIGUSR2);
+            pthread_mutex_lock(&mutex);
+            partie->joueurs[i].flag_tour = 1;
+            pthread_mutex_unlock(&mutex);
             printf("\nLettres à jouer : %s\n", lettres_a_jouer);
-            int tube_mot_joué = open_named_pipe(partie->joueurs[i].tube_name, O_RDWR);
+            int tube_mot_joué = open_named_pipe(partie->joueurs[i].tube_name, O_RDWR | O_NONBLOCK);
             printf("Envoi d'un signal c'est à toi de jouer au joueur %d.\n", partie->joueurs[i].id);
 
             char mot_joué[MAX_LONGUEUR_MOT];
@@ -217,23 +310,12 @@ void *game_thread(void *arg) {
                 printf("Attente du mot joué du joueur %s...\n", partie->joueurs[i].pseudo);
                 sem_wait(partie_semaphore); // Wait before reading
                 printf("Lecture du mot joué\n");
-                bytes_read = read_from_pipe(tube_mot_joué, mot_joué, sizeof(mot_joué));
-                printf("mot_joué = %s\n", mot_joué);
-                if(strncmp(mot_joué, "PlayerLostLife", 14) == 0){
-                    printf("Le joueur %s a perdu une vie.\n", partie->joueurs[i].pseudo);
-                    write_to_pipe(tube_mot_joué, "Vie perdue", strlen("Vie perdue") + 1);
-                    FLAG_TIMER = 1;
-                    sem_post(partie_reponse_semaphore);
-                    break;
-                }
-                if(strncmp(mot_joué, "PlayerOut", 9) == 0){
-                    printf("Le joueur %s a perdu la partie.\n", partie->joueurs[i].pseudo);
-                    write_to_pipe(tube_mot_joué, "Perdu", strlen("Perdu") + 1);
-                    sem_post(partie_reponse_semaphore);
+                while((bytes_read = read_from_pipe(tube_mot_joué, mot_joué, sizeof(mot_joué)))<=0 && partie->etat != EXPLOSION && partie->etat != PARTIE_TERMINEE);
+                if(partie->etat == EXPLOSION || partie->etat == PARTIE_TERMINEE){
                     break;
                 }
                 //get the semaphore value
-                if (bytes_read > 0 ) {
+                if (bytes_read > 0) {
                     mot_joué[bytes_read] = '\0'; // Terminer le buffer avec un caractère null
                     if (!mot_existe(mot_joué, dictionnaire) || strstr(mot_joué, lettres_a_jouer) == NULL) {
                         printf("Le joueur %s a joué le mot %s (incorrect).\n", partie->joueurs[i].pseudo, mot_joué);
@@ -249,34 +331,33 @@ void *game_thread(void *arg) {
                     perror("Erreur lors de la lecture du mot joué");
                 }
             } while (!mot_existe(mot_joué, dictionnaire) || strstr(mot_joué, lettres_a_jouer) == NULL);
-            sem_wait(mot_semaphore);
-            // Vérifier si tous les joueurs ont perdu
-            printf("Vérification des joueurs actifs...\n");
-            int joueurs_actifs = 0;
-            for (int i = 0; i < partie->nombre_joueur_courant; i++) {
-                if (partie->joueurs[i].etat != PERDU) {
-                    joueurs_actifs++;
-                }
+            if(temps_bombe <= 1 && partie->etat != EXPLOSION){
+                // réinitialiser le temps de la bombe pour éviter qu'elle n'explose avant la fin du tour
+                temps_bombe = 1; 
             }
-            if (joueurs_actifs == 1) {
-                printf("Il ne reste qu'un seul joueur dans la partie.\n");
-                FLAG_PARTIE = 1;
-                break;
-            }
-            if(FLAG_TIMER == 1){
-                FLAG_TIMER = 0;
+            if(partie->etat == EXPLOSION){                
                 continue;
             }
+            if(partie->etat == PARTIE_TERMINEE){
+                break;
+            }
             printf("Le joueur %s a joué le mot %s (correct).\n", partie->joueurs[i].pseudo, mot_joué);
+            sem_wait(mot_semaphore);
             printf("Le joueur %s a réussi à jouer le mot %s.\n", partie->joueurs[i].pseudo, mot_joué);
             close_pipe(tube_mot_joué);
+            pthread_mutex_lock(&mutex);
+            partie->joueurs[i].flag_tour = 0;
+            pthread_mutex_unlock(&mutex);
             memset(mot_joué, 0, sizeof(mot_joué));
             memset(lettres_a_jouer, 0, sizeof(lettres_a_jouer));
         }
         // Libérer les ressources de la table de hachage
         freeTable(groupes_lettres_utilisés);
     }
+    sem_close(mot_semaphore);
+    sem_close(partie_reponse_semaphore);
     sem_close(partie_semaphore);
+    CHECK(pthread_join(thread_bombe, NULL), -1, "Erreur lors de la terminaison du thread de la bombe");
     return NULL;
 }
 
